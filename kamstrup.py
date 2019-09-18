@@ -12,12 +12,19 @@ from __future__ import print_function
 
 # You need pySerial 
 import serial
-
+import traceback
 import math
+import logging
 
 #######################################################################
 # These are the variables I have managed to identify
 # Submissions welcome.
+
+kamstrup_MC21_var = {
+	0x44: 'Volume register V1', # (m3)
+	0x4A: 'Current flow', # (l/h)
+	0xEF: 'Volume', #  (l)
+}
 
 kamstrup_382_var = {
 
@@ -44,6 +51,16 @@ kamstrup_382_var = {
 	0x0540: "Power p1 Out",
 	0x0541: "Power p2 Out",
 	0x0542: "Power p3 Out",
+}
+
+kamstrup_MC403_var = {
+	0x3C: 'Energy register 1: Heat energy', # (MWh)
+	0x50: 'Current Power', #  (kW)
+	0x56: 'Current flow temperature', # (C)
+	0x57: 'Current return flow temperature', # (C)
+	0x59: 'Current temperature difference', # (K)
+	0x4A: 'Current flow', # (l/h)
+	0x44: 'Volume register V1', # (m3)
 }
 
 kamstrup_681_var = {
@@ -119,45 +136,34 @@ escapes = {
 #
 class kamstrup(object):
 
-	def __init__(self, serial_port = "/dev/cuaU0"):
-		self.debug_fd = open("/tmp/_kamstrup", "a")
-		self.debug_fd.write("\n\nStart\n")
-		self.debug_id = None
-
+	def __init__(self, serial_port = "/dev/cuaU0", baud=9600):
 		self.ser = serial.Serial(
 		    port = serial_port,
-		    baudrate = 9600,
+		    baudrate = baud,
 		    timeout = 1.0)
 
-	def debug(self, dir, b):
-		for i in b:
-			if dir != self.debug_id:
-				if self.debug_id != None:
-					self.debug_fd.write("\n")
-				self.debug_fd.write(dir + "\t")
-				self.debug_id = dir
-			self.debug_fd.write(" %02x " % i)
-		self.debug_fd.flush()
+	def __enter__(self):
+		return self
+        
+	def __exit__(self, type, value, traceback):
+		self.ser.close()
 
-	def debug_msg(self, msg):
-		if self.debug_id != None:
-			self.debug_fd.write("\n")
-		self.debug_id = "Msg"
-		self.debug_fd.write("Msg\t" + msg)
-		self.debug_fd.flush()
+	def debug(self, dir, b):
+		hex_string = " ".join(["%02x" % i for i in b])
+		logging.debug("{}\t{}".format(dir, hex_string))
 
 	def wr(self, b):
 		b = bytearray(b)
-		self.debug("Wr", b);
+		self.debug("Wr", b)
 		self.ser.write(b)
 
 	def rd(self):
 		a = self.ser.read(1)
 		if len(a) == 0:
-			self.debug_msg("Rx Timeout")
+			logging.warning("Rx Timeout")
 			return None
 		b = bytearray(a)[0]
-		self.debug("Rd", bytearray((b,)));
+		self.debug("Rd", bytearray((b,)))
 		return b
 
 	def send(self, pfx, msg):
@@ -192,20 +198,19 @@ class kamstrup(object):
 			if d == 0x0d:
 				break
 		c = bytearray()
-		i = 1;
+		i = 1
 		while i < len(b) - 1:
 			if b[i] == 0x1b:
 				v = b[i + 1] ^ 0xff
 				if v not in escapes:
-					self.debug_msg(
-					    "Missing Escape %02x" % v)
+					logging.error("Missing Escape %02x" % v)
 				c.append(v)
 				i += 2
 			else:
 				c.append(b[i])
 				i += 1
 		if crc_1021(c):
-			self.debug_msg("CRC error")
+			logging.error("CRC error")
 		return c[:-2]
 
 	def readvar(self, nbr):
@@ -220,6 +225,9 @@ class kamstrup(object):
 			return (None, None)
 
 		if b[0] != 0x3f or b[1] != 0x10:
+			return (None, None)
+
+		if b[0] == 0x3f and b[1] == 0x10 and len(b) == 2:
 			return (None, None)
 
 		if b[2] != nbr >> 8 or b[3] != nbr & 0xff:
@@ -249,25 +257,24 @@ class kamstrup(object):
 			# Debug print
 			s = ""
 			for i in b[:4]:
-				s += " %02x" % i
-			s += " |"
+				s += "%02x " % i
+			s += "| "
 			for i in b[4:7]:
-				s += " %02x" % i
-			s += " |"
+				s += "%02x " % i
+			s += "| "
 			for i in b[7:]:
-				s += " %02x" % i
+				s += "%02x " % i
 
-			print(s, "=", x, units[b[4]])
+			logging.debug("{}= {} {}".format(str(s), str(x), str(units[b[4]])))
 
 		return (x, u)
 			
 
 if __name__ == "__main__":
 
-	import time
-
-	foo = kamstrup()
-
-	for i in kamstrup_382_var:
-		x,u = foo.readvar(i)
-		print("%-25s" % kamstrup_382_var[i], x, u)
+	logging.basicConfig(filename='/tmp/_kamstrup.log', filemode='w', format='%(levelname)s - %(message)s', level=logging.DEBUG)
+	
+	with kamstrup() as foo:
+		for i in kamstrup_382_var:
+			x,u = foo.readvar(i)
+			print("%-25s" % kamstrup_382_var[i], x, u)
